@@ -372,7 +372,7 @@ module cva6 import ariane_pkg::*; #(
   end else begin
     assign trans_id_ex_id = {flu_trans_id_ex_id[0],flu_trans_id_ex_id[1], load_trans_id_ex_id, store_trans_id_ex_id, fpu_trans_id_ex_id};
     assign wbdata_ex_id   = {flu_result_ex_id[0],flu_result_ex_id[1], load_result_ex_id, store_result_ex_id, fpu_result_ex_id};
-    assign ex_ex_ex_id    = {flu_exception_ex_id[0], flu_exception_ex_id[1], store_exception_ex_id, fpu_exception_ex_id};
+    assign ex_ex_ex_id    = {flu_exception_ex_id[0], flu_exception_ex_id[1], load_exception_ex_id, store_exception_ex_id, fpu_exception_ex_id};
     assign wt_valid_ex_id = {flu_valid_ex_id[0], flu_valid_ex_id[1], load_valid_ex_id, store_valid_ex_id, fpu_valid_ex_id};
   end
   // ---------

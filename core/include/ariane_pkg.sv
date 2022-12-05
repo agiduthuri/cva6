@@ -138,7 +138,10 @@ package ariane_pkg;
 
     localparam ENABLE_RENAME = cva6_config_pkg::CVA6ConfigRenameEn;
 
-    localparam ISSUE_WIDTH = 1;
+    // Delete localparam ISSUE_WIDTH = 1;
+    localparam ISSUE_WIDTH = 2;
+    localparam ISSUE_WIDTH_BITS = ISSUE_WIDTH == 1 ? 1 : $clog2(ISSUE_WIDTH);
+
     // amount of pipeline registers inserted for load/store return path
     // this can be tuned to trade-off IPC vs. cycle time
     localparam int unsigned NR_LOAD_PIPE_REGS = 1;
@@ -223,10 +226,19 @@ package ariane_pkg;
     // 32 registers + 1 bit for re-naming = 6
     localparam REG_ADDR_SIZE = 6;
 
+    // cva6_config_pkg::CVA6ConfigCvxifEn value is cv32(value == 0) cv64(value ==1)
+
     localparam bit CVXIF_PRESENT = cva6_config_pkg::CVA6ConfigCvxifEn;
 
     // when cvx interface is present, use an additional writeback port
-    localparam NR_WB_PORTS = CVXIF_PRESENT ? 5 : 4;
+    
+    // localparam NR_WB_PORTS = CVXIF_PRESENT ? 5 : 4;
+    localparam NR_WB_PORTS = CVXIF_PRESENT ? 6 : 5;
+    
+    // number of ALUs
+    localparam NR_ALU = 2;
+    // number of FLUs
+    localparam NR_FLU = 2;
 
     // Read ports for general purpose register files
     localparam NR_RGPR_PORTS = 2;
@@ -301,7 +313,7 @@ package ariane_pkg;
 
     // leave as is (fails with >8 entries and wider fetch width)
     localparam int unsigned FETCH_FIFO_DEPTH  = 4;
-    localparam int unsigned FETCH_WIDTH       = 32;
+    localparam int unsigned FETCH_WIDTH       = 64;
     // maximum instructions we can fetch on one request (we support compressed instructions)
     localparam int unsigned INSTR_PER_FETCH = RVC == 1'b1 ? (FETCH_WIDTH / 16) : 1;
     localparam int unsigned LOG2_INSTR_PER_FETCH = RVC == 1'b1 ? $clog2(ariane_pkg::INSTR_PER_FETCH) : 1;

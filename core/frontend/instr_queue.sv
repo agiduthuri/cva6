@@ -61,10 +61,11 @@ module instr_queue import ariane_pkg::*; (
   // replay instruction because one of the FIFO was already full
   output logic                                               replay_o,
   output logic [riscv::VLEN-1:0]                             replay_addr_o, // address at which to replay this instruction
+  output logic [$clog2(ariane_pkg::INSTR_PER_FETCH)-1:0]     push_instr_cnt_o,
   // to processor backend
-  output ariane_pkg::fetch_entry_t                           fetch_entry_o,
-  output logic                                               fetch_entry_valid_o,
-  input  logic                                               fetch_entry_ready_i
+  output ariane_pkg::fetch_entry_t [ariane_pkg::ISSUE_WIDTH-1:0]  fetch_entry_o,
+  output logic [ariane_pkg::ISSUE_WIDTH-1:0]                      fetch_entry_valid_o,
+  input  logic [ariane_pkg::ISSUE_WIDTH-1:0]                      fetch_entry_ready_i
 );
 
   typedef struct packed {
@@ -79,12 +80,15 @@ module instr_queue import ariane_pkg::*; (
   logic [ariane_pkg::INSTR_PER_FETCH-1:0]
         [$clog2(ariane_pkg::FETCH_FIFO_DEPTH)-1:0] instr_queue_usage;
   instr_data_t [ariane_pkg::INSTR_PER_FETCH-1:0]   instr_data_in, instr_data_out;
+  instr_data_t [ariane_pkg::ISSUE_WIDTH-1:0]       fetch_instr_data;
   logic [ariane_pkg::INSTR_PER_FETCH-1:0]          push_instr, push_instr_fifo;
   logic [ariane_pkg::INSTR_PER_FETCH-1:0]          pop_instr;
   logic [ariane_pkg::INSTR_PER_FETCH-1:0]          instr_queue_full;
   logic [ariane_pkg::INSTR_PER_FETCH-1:0]          instr_queue_empty;
   logic instr_overflow;
   // address queue
+  logic valid_cf_push;
+  logic [ariane_pkg::ISSUE_WIDTH-1:0] fetch_cf;
   logic [$clog2(ariane_pkg::FETCH_FIFO_DEPTH)-1:0] address_queue_usage;
   logic [riscv::VLEN-1:0] address_out;
   logic pop_address;
@@ -98,7 +102,14 @@ module instr_queue import ariane_pkg::*; (
   // output FIFO select, one-hot
   logic [ariane_pkg::INSTR_PER_FETCH-1:0] idx_ds_d, idx_ds_q;
   logic [riscv::VLEN-1:0] pc_d, pc_q; // current PC
+  logic [ariane_pkg::ISSUE_WIDTH-1:0][63:0] pc_new; // pc for every fetched entry
   logic reset_address_d, reset_address_q; // we need to re-set the address because of a flush
+
+  // logic to update FIFO pointer
+  logic [ariane_pkg::ISSUE_WIDTH_BITS:0] idx_ds_shift;
+  logic [ariane_pkg::ISSUE_WIDTH_BITS-1:0] idx_ds_shift_cnt;
+  logic [ariane_pkg::INSTR_PER_FETCH*2-1:0] idx_ds_extended;
+  logic idx_ds_shift_all;
 
   logic [ariane_pkg::INSTR_PER_FETCH*2-2:0] branch_mask_extended;
   logic [ariane_pkg::INSTR_PER_FETCH-1:0] branch_mask;
@@ -117,7 +128,7 @@ module instr_queue import ariane_pkg::*; (
   // replay interface
   logic [ariane_pkg::INSTR_PER_FETCH-1:0] instr_overflow_fifo;
 
-  assign ready_o = ~(|instr_queue_full) & ~full_address;
+  assign ready_o = ~(|instr_queue_full) & ~(|full_address);
   
   if (ariane_pkg::RVC) begin : gen_multiple_instr_per_fetch_with_C
   
@@ -247,27 +258,60 @@ module instr_queue import ariane_pkg::*; (
     assign replay_addr_o = addr_i[0];
   end
   
+  assign push_instr_cnt_o = shamt_push_instr;
+  
   // ----------------------
   // Downstream interface
   // ----------------------
-  // as long as there is at least one queue which can take the value we have a valid instruction
-  assign fetch_entry_valid_o = ~(&instr_queue_empty);
+  // update the FIFO pointer by calculating the leading ones in fetch ready signal
+  // if we have dual issue, when the ready signal is
+  // 0 1 -> left shift by 1
+  // 1 0 -> no shift
+  // 0 0 -> no shift
+  // 1 1 -> left shift by 2
+  generate
+    // Default single-issue
+    if ( ariane_pkg::ISSUE_WIDTH == 1) begin
+      assign idx_ds_shift_cnt = fetch_entry_ready_i[0];
+      assign idx_ds_shift_all = 1'b0;
+    // Dual-Issue
+    end else begin
+      lzc #(
+        .WIDTH ( ariane_pkg::ISSUE_WIDTH )
+      ) i_lzc_idx_ds_shift (
+        .in_i    ( ~fetch_entry_ready_i ),
+        .cnt_o   ( idx_ds_shift_cnt     ),
+        .empty_o ( idx_ds_shift_all     )
+      );
+    end
+  endgenerate
   
   if (ariane_pkg::RVC) begin : gen_downstream_itf_with_c
     always_comb begin
       idx_ds_d = idx_ds_q;
 
       pop_instr = '0;
-      // assemble fetch entry
-      fetch_entry_o.instruction = '0;
-      fetch_entry_o.address = pc_q;
-      fetch_entry_o.ex.valid = 1'b0;
-      fetch_entry_o.ex.cause = '0;
+    // select the instr data to fetch
+    for (int unsigned i = 0; i < ariane_pkg::INSTR_PER_FETCH; i++) begin : gen_shifted_instr_out
+      if (idx_ds_q[i]) begin
+        for (int unsigned j = 0; j < ariane_pkg::ISSUE_WIDTH; j++) begin
+          fetch_instr_data[j] = instr_data_out[(i+j)%ariane_pkg::INSTR_PER_FETCH];
+        end
+      end
+    end
 
-      fetch_entry_o.ex.tval = '0;
-      fetch_entry_o.branch_predict.predict_address = address_out;
-      fetch_entry_o.branch_predict.cf = ariane_pkg::NoCF;
-      // output mux select
+    for (int unsigned i = 0; i < ariane_pkg::ISSUE_WIDTH; i++) begin
+      // assemble fetch entry
+      fetch_entry_o[i].instruction = fetch_instr_data[i].instr;
+      fetch_entry_o[i].address = pc_new[i];
+      fetch_entry_o[i].ex.valid = fetch_instr_data[i].ex;
+      // This is the only exception which can occur up to this point.
+      fetch_entry_o[i].ex.cause = riscv::INSTR_PAGE_FAULT;
+      fetch_entry_o[i].ex.tval = pc_new[i];
+      fetch_entry_o[i].branch_predict.predict_address = address_out;
+      fetch_entry_o[i].branch_predict.cf = fetch_instr_data[i].cf;
+    end
+
       for (int unsigned i = 0; i < ariane_pkg::INSTR_PER_FETCH; i++) begin
         if (idx_ds_q[i]) begin
           if (instr_data_out[i].ex == ariane_pkg::FE_INSTR_ACCESS_FAULT) begin
@@ -275,17 +319,18 @@ module instr_queue import ariane_pkg::*; (
           end else begin
             fetch_entry_o.ex.cause = riscv::INSTR_PAGE_FAULT;
           end
-          fetch_entry_o.instruction = instr_data_out[i].instr;
-          fetch_entry_o.ex.valid = instr_data_out[i].ex != ariane_pkg::FE_NONE;
-          fetch_entry_o.ex.tval  = {{64-riscv::VLEN{1'b0}}, instr_data_out[i].ex_vaddr};
-          fetch_entry_o.branch_predict.cf = instr_data_out[i].cf;
-          pop_instr[i] = fetch_entry_valid_o & fetch_entry_ready_i;
+        for (int unsigned j = 0; j < ariane_pkg::ISSUE_WIDTH; j++) begin
+          // fetch entry is valid if that instruction queue is not empty
+          fetch_entry_valid_o[j] = ~instr_queue_empty[(i+j)%ariane_pkg::INSTR_PER_FETCH];
+          // handshake and pop the instruction
+          pop_instr[(i+j)%ariane_pkg::INSTR_PER_FETCH] = fetch_entry_valid_o[j] & fetch_entry_ready_i[j];
+          end
         end
       end
       // rotate the pointer left
-      if (fetch_entry_ready_i) begin
-        idx_ds_d = {idx_ds_q[ariane_pkg::INSTR_PER_FETCH-2:0], idx_ds_q[ariane_pkg::INSTR_PER_FETCH-1]};
-      end
+      idx_ds_shift = idx_ds_shift_all ? ariane_pkg::ISSUE_WIDTH : idx_ds_shift_cnt;
+      idx_ds_extended = {idx_ds_q, idx_ds_q} << idx_ds_shift;
+      idx_ds_d = idx_ds_extended[ariane_pkg::INSTR_PER_FETCH*2-1:ariane_pkg::INSTR_PER_FETCH];
     end
   end else begin : gen_downstream_itf_without_c
     always_comb begin
@@ -309,30 +354,31 @@ module instr_queue import ariane_pkg::*; (
     end
   end
 
-  // TODO(zarubaf): This needs to change for dual-issue
+  // assigning fetch_cf wire
+  for (genvar i = 0; i < ariane_pkg::ISSUE_WIDTH; i++) begin : gen_fetch_entry_cf
+    assign fetch_cf[i] = (fetch_instr_data[i].cf != ariane_pkg::NoCF);
+  end
+
   // if the handshaking is successful and we had a prediction pop one address entry
-  assign pop_address = ((fetch_entry_o.branch_predict.cf != ariane_pkg::NoCF) & |pop_instr);
+  assign pop_address = |(fetch_cf & fetch_entry_ready_i);
 
   // ----------------------
   // Calculate (Next) PC
   // ----------------------
   always_comb begin
+    pc_new = '0;
     pc_d = pc_q;
     reset_address_d = flush_i ? 1'b1 : reset_address_q;
 
-    if (fetch_entry_ready_i) begin
-      // TODO(zarubaf): This needs to change for a dual issue implementation
-      // advance the PC
-      if (ariane_pkg::RVC == 1'b1) begin : gen_pc_with_c_extension
-        pc_d =  pc_q + ((fetch_entry_o.instruction[1:0] != 2'b11) ? 'd2 : 'd4);
-      end else begin : gen_pc_without_c_extension
-        pc_d =  pc_q + 'd4;
+    // Updating next PC for dual-issue
+    for (int unsigned i = 0; i < ariane_pkg::ISSUE_WIDTH; i++) begin
+      pc_new[i] = pc_d;
+      if (fetch_entry_ready_i[i]) begin
+        pc_d = fetch_cf[i] ? address_out : ((pc_d + ((fetch_entry_o[i].instruction[1:0] != 2'b11) ? 'd2 : 'd4)));
       end
     end
 
-    if (pop_address) pc_d = address_out;
-
-      // we previously flushed so we need to reset the address
+    // we previously flushed so we need to reset the address
     if (valid_i[0] && reset_address_q) begin
       // this is the base of the first instruction
       pc_d = addr_i[0];

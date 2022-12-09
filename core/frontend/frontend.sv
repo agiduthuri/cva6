@@ -41,9 +41,9 @@ module frontend import ariane_pkg::*; #(
   output icache_dreq_i_t     icache_dreq_o,
   input  icache_dreq_o_t     icache_dreq_i,
   // instruction output port -> to processor back-end
-  output fetch_entry_t       fetch_entry_o,       // fetch entry containing all relevant data for the ID stage
-  output logic               fetch_entry_valid_o, // instruction in IF is valid
-  input  logic               fetch_entry_ready_i  // ID acknowledged this instruction
+  output fetch_entry_t [ariane_pkg::ISSUE_WIDTH-1:0]       fetch_entry_o,       // fetch entry containing all relevant data for the ID stage
+  output logic [ariane_pkg::ISSUE_WIDTH-1:0]               fetch_entry_valid_o, // instruction in IF is valid
+  input  logic [ariane_pkg::ISSUE_WIDTH-1:0]               fetch_entry_ready_i  // ID acknowledged this instruction
 );
     // Instruction Cache Registers, from I$
     logic [FETCH_WIDTH-1:0] icache_data_q;
@@ -64,6 +64,9 @@ module frontend import ariane_pkg::*; #(
 
     logic                   replay;
     logic [riscv::VLEN-1:0] replay_addr;
+
+    // add push_instr_cnt wire, which is additional input for bht and output for instr_queue
+    logic [$clog2(INSTR_PER_FETCH)-1:0] push_instr_cnt;
 
     // shift amount
     logic [$clog2(ariane_pkg::INSTR_PER_FETCH)-1:0] shamt;
@@ -417,6 +420,8 @@ module frontend import ariane_pkg::*; #(
       .flush_i          ( flush_bp_i       ),
       .debug_mode_i,
       .vpc_i            ( icache_vaddr_q   ),
+      .push_instr_cnt_i ( push_instr_cnt   ),
+      .cf_type_i        ( cf_type          ),
       .bht_update_i     ( bht_update       ),
       .bht_prediction_o ( bht_prediction   )
     );
@@ -454,6 +459,7 @@ module frontend import ariane_pkg::*; #(
       .cf_type_i           ( cf_type              ),
       .valid_i             ( instruction_valid    ), // from re-aligner
       .consumed_o          ( instr_queue_consumed ),
+      .push_instr_cnt_o    ( push_instr_cnt       ),
       .ready_o             ( instr_queue_ready    ),
       .replay_o            ( replay               ),
       .replay_addr_o       ( replay_addr          ),
